@@ -6,10 +6,17 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "roads:download": "tsx scripts/roads/download.ts",
+    "roads:build": "node --max-old-space-size=8192 --import tsx scripts/roads/build.ts",
+    "roads:bench": "tsx scripts/roads/bench.ts",
+    "roads:sample": "tsx scripts/roads/sample-google.ts",
+    "roads:calibrate": "tsx scripts/roads/calibrate.ts"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",
+    "osm-pbf-parser-node": "^1.1.4",
+    "tsx": "^4.23.15",
     "typescript": "^5.6.3",
     "vitest": "^2.1.9"
   }

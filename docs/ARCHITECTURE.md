@@ -31,9 +31,9 @@ minute-accurate schedule. A solve may take up to ~1 minute.
 2. **Estimates (free)** for every pair:
    - walk: crow-fly x 1.3 / 4.8 km/h, used as final value (no cap: the walk
      coefficient decides);
-   - drive: offline road graph from OpenStreetMap, speeds per road class
-     calibrated on a few dozen Google measurements (*next step*); crow-fly
-     model meanwhile;
+   - drive: offline road graph from OpenStreetMap (junctions only, one-ways,
+     traffic lights), time = km x pace per road group + per light + per
+     junction + fixed, fitted on reference trips (own times or Google);
    - transit: crow-fly model, superseded by cached zone-to-zone values.
 3. **Lazy measurement** (`planning/lazySolve.ts`): solve on estimates, measure
    the unknown transit / drive legs of the best 2k tours (PRIM / Google), solve
@@ -72,8 +72,10 @@ src/lib/
   geo/         geo (haversine), crowFly (estimate models), zones (cells, slots, keys)
   cache/       TravelTimeCache interface, in-memory implementation
   planning/    lazySolve (measurement loop), cachedSource (zone cache + fetcher)
-  (next)       roads/ (OSM graph build script + runtime Dijkstra),
-               google/ (places, routes), prim/ (transit), auth, rateLimit
+  roads/       OSM -> compact directed graph (build), binary format, Dijkstra and
+               drive matrix (graph), linear time model fit on reference trips
+               (calibrate); scripts/roads/ runs them on the real extract
+  (next)       google/ (places, routes), prim/ (transit), auth, rateLimit
 src/app/       (next) form, candidates, results, map, /api/candidates, /api/solve
 ```
 

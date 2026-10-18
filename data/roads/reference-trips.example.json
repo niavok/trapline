@@ -1,0 +1,9 @@
+{
+  "trips": [
+    { "from": "Home", "to": "Belle Epine Thiais", "minutes": 18, "source": "own experience" },
+    { "from": "Belle Epine Thiais", "to": "Home", "minutes": 15, "source": "own experience" },
+    { "from": "Home", "to": "Val d'Europe", "minutes": null, "source": "own experience" },
+    { "from": "Home", "to": "Carre Senart", "minutes": null, "source": "own experience" },
+    { "from": "Home", "to": "Velizy 2", "minutes": null, "source": "own experience" }
+  ]
+}

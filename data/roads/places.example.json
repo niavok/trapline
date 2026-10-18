@@ -1,0 +1,11 @@
+[
+  { "name": "Home", "lat": 0, "lng": 0 },
+  { "name": "Les Halles", "lat": 48.8622, "lng": 2.347 },
+  { "name": "La Defense 4 Temps", "lat": 48.891, "lng": 2.239 },
+  { "name": "Velizy 2", "lat": 48.7812, "lng": 2.221 },
+  { "name": "Belle Epine Thiais", "lat": 48.756, "lng": 2.365 },
+  { "name": "Val d'Europe", "lat": 48.8545, "lng": 2.776 },
+  { "name": "Carre Senart", "lat": 48.6055, "lng": 2.593 },
+  { "name": "Parly 2", "lat": 48.827, "lng": 2.117 },
+  { "name": "Rosny 2", "lat": 48.88, "lng": 2.48 }
+]
