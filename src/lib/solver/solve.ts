@@ -16,6 +16,8 @@ interface Label {
   pos: number;
   car: number;
   mask: number;
+  /** Encodes the set of shops visited so far (see `shopSignatures`). */
+  sig: number;
   parent: Label | null;
   /** Mode of the leg that led here (null for the start label). */
   mode: Mode | null;
@@ -24,6 +26,7 @@ interface Label {
 interface Settled {
   g: number;
   time: number;
+  sig: number;
 }
 
 /**
@@ -33,10 +36,18 @@ interface Settled {
  * Search: label-setting A* over the state (position, car position, visited
  * brands), with a consistent lower bound (see `buildHeuristic`). Each label
  * also carries the real clock time, which drives opening-hour checks. Because
- * waiting is allowed and costs 1 per minute, a label A dominates B at the same
- * state when A.time <= B.time and A.g + (B.time - A.time) <= B.g: A can always
- * "wait" to replay any continuation of B at no higher cost. A label is
- * discarded once k settled labels dominate it, which keeps the top-k exact.
+ * waiting is allowed and costs c per minute, a label A dominates B at the same
+ * state when A.time <= B.time and A.g + c * extraWait <= B.g, where
+ * extraWait = max(0, min(B.time, W) - A.time) bounds how much more A may have
+ * to wait than B when replaying B's continuation, W being the latest opening
+ * time among the shops still to visit (no waiting can happen after W).
+ *
+ * Top-k stays exact by only discarding a label once k settled labels dominate
+ * it. With `distinct: "shopSet"`, those k dominators must have k different
+ * shop sets, or one of them must have the very same shop set: any completion
+ * of the dropped label is then beaten for its own set, or its set cannot rank
+ * in the top-k (all labels at a state share the brands still to do, so equal
+ * completions keep shop sets distinct).
  */
 export function solve(input: SolverInput): SolveResult {
   validate(input);
@@ -54,7 +65,10 @@ export function solve(input: SolverInput): SolveResult {
   const hasCar = input.matrices.drive !== undefined;
   const maxExpanded = input.maxExpandedLabels ?? DEFAULT_MAX_EXPANDED;
   const k = Math.max(1, Math.floor(input.k));
+  const bySet = (input.distinct ?? "shopSet") === "shopSet";
+  const shopSig = shopSignatures(input);
   const dwell = input.dwellMinutes;
+  const waitCost = input.waitCostPerMinute ?? 0;
 
   // Per-node lookups for the hot loop.
   const brandBit = input.nodes.map((node) =>
@@ -71,13 +85,29 @@ export function solve(input: SolverInput): SolveResult {
     (pos * carSlots + (car + 1)) * maskSlots + mask;
 
   const settled = new Map<number, Settled[]>();
-  const isDominated = (key: number, g: number, time: number): boolean => {
+  const waitHorizon = latestOpeningByMask(input);
+  const isDominated = (key: number, g: number, time: number, sig: number, mask: number): boolean => {
     const list = settled.get(key);
-    if (!list || list.length < k) return false;
-    let count = 0;
+    if (!list) return false;
+    const horizon = Math.min(time, waitHorizon[mask]!);
+    const dominates = (s: Settled) =>
+      s.time <= time + EPSILON && s.g + waitCost * Math.max(0, horizon - s.time) <= g + EPSILON;
+    if (!bySet) {
+      if (list.length < k) return false;
+      let count = 0;
+      for (const s of list) {
+        if (dominates(s) && ++count >= k) return true;
+      }
+      return false;
+    }
+    const sets: number[] = [];
     for (const s of list) {
-      if (s.time <= time + EPSILON && s.g + (time - s.time) <= g + EPSILON) {
-        if (++count >= k) return true;
+      if (dominates(s)) {
+        if (s.sig === sig) return true;
+        if (!sets.includes(s.sig)) {
+          sets.push(s.sig);
+          if (sets.length >= k) return true;
+        }
       }
     }
     return false;
@@ -92,11 +122,13 @@ export function solve(input: SolverInput): SolveResult {
     pos: home,
     car: startCar,
     mask: 0,
+    sig: 0,
     parent: null,
     mode: null,
   });
 
   const goals: Label[] = [];
+  const goalSets = new Set<number>();
   let expanded = 0;
   let truncated = false;
 
@@ -104,14 +136,17 @@ export function solve(input: SolverInput): SolveResult {
     const label = heap.pop()!;
     const { pos, car, mask } = label;
     const key = stateKey(pos, car, mask);
-    if (isDominated(key, label.g, label.time)) continue;
+    if (isDominated(key, label.g, label.time, label.sig, mask)) continue;
+    const entry = { g: label.g, time: label.time, sig: label.sig };
     const list = settled.get(key);
-    if (list) list.push({ g: label.g, time: label.time });
-    else settled.set(key, [{ g: label.g, time: label.time }]);
+    if (list) list.push(entry);
+    else settled.set(key, [entry]);
 
     const allDone = mask === goalMask;
     if (pos === home && allDone && (car === home || car === NO_CAR)) {
-      goals.push(label);
+      // At the goal only the score matters: keep the first (best) per set.
+      if (!bySet || !goalSets.has(label.sig)) goals.push(label);
+      goalSets.add(label.sig);
       continue;
     }
 
@@ -143,15 +178,17 @@ export function solve(input: SolverInput): SolveResult {
         let time = label.time + travel + park;
         let g = label.g + travel * coef + park;
         let nextMask = mask;
+        let sig = label.sig;
         if (visits) {
           const start = earliestStart(intervals[to], time, dwell);
           if (start === null) continue;
-          g += start - time + dwell;
+          g += (start - time) * waitCost + dwell;
           time = start + dwell;
           nextMask |= bit;
+          sig += shopSig[to]!;
         }
         const nextCar = isDrive ? to : car;
-        if (isDominated(stateKey(to, nextCar, nextMask), g, time)) continue;
+        if (isDominated(stateKey(to, nextCar, nextMask), g, time, sig, nextMask)) continue;
         heap.push({
           g,
           f: g + heuristic(to, nextCar, nextMask),
@@ -159,6 +196,7 @@ export function solve(input: SolverInput): SolveResult {
           pos: to,
           car: nextCar,
           mask: nextMask,
+          sig,
           parent: label,
           mode,
         });
@@ -173,6 +211,52 @@ export function solve(input: SolverInput): SolveResult {
     expandedLabels: expanded,
     truncated,
   };
+}
+
+/**
+ * For each visited-brands mask, the latest time at which a shop still to visit
+ * opens (start of any of its intervals). After that time nobody ever waits.
+ */
+function latestOpeningByMask(input: SolverInput): Float64Array {
+  const brandCount = input.brands.length;
+  const latestByBrand = new Array<number>(brandCount).fill(-Infinity);
+  for (const node of input.nodes) {
+    if (node.kind !== "shop" || node.brandIndex === undefined || !node.openIntervals) continue;
+    for (const [start] of node.openIntervals) {
+      latestByBrand[node.brandIndex] = Math.max(latestByBrand[node.brandIndex]!, start);
+    }
+  }
+  const result = new Float64Array(1 << brandCount);
+  for (let mask = 0; mask < result.length; mask++) {
+    let latest = -Infinity;
+    for (let b = 0; b < brandCount; b++) {
+      if ((mask & (1 << b)) === 0) latest = Math.max(latest, latestByBrand[b]!);
+    }
+    result[mask] = latest;
+  }
+  return result;
+}
+
+/**
+ * Mixed-radix code per shop so that the sum over visited shops identifies the
+ * shop set (one shop per brand): shop j of brand b contributes
+ * (j + 1) * prod_{b' < b} (shopsOf(b') + 1).
+ */
+function shopSignatures(input: SolverInput): number[] {
+  const counts = new Array<number>(input.brands.length).fill(0);
+  const local = input.nodes.map((node) =>
+    node.kind === "shop" && node.brandIndex !== undefined ? ++counts[node.brandIndex]! : 0,
+  );
+  const radix: number[] = [];
+  let product = 1;
+  for (const count of counts) {
+    radix.push(product);
+    product *= count + 1;
+  }
+  if (product > Number.MAX_SAFE_INTEGER) throw new Error("Too many candidates to tell shop sets apart");
+  return input.nodes.map((node, i) =>
+    node.kind === "shop" && node.brandIndex !== undefined ? local[i]! * radix[node.brandIndex]! : 0,
+  );
 }
 
 /** Rebuilds the detailed legs of a goal label by replaying its itinerary. */
@@ -333,5 +417,5 @@ function validate(input: SolverInput): void {
       }
     }
   }
-  if (input.dwellMinutes < 0 || input.parkingPenaltyMinutes < 0) throw new Error("Negative durations are not allowed");
+  if (input.dwellMinutes < 0 || input.parkingPenaltyMinutes < 0 || (input.waitCostPerMinute ?? 0) < 0) throw new Error("Negative durations are not allowed");
 }

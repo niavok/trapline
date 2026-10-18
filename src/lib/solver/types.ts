@@ -42,8 +42,20 @@ export interface SolverInput {
   dwellMinutes: number;
   /** Default penalty added on each car arrival (except at home). */
   parkingPenaltyMinutes: number;
+  /**
+   * Score of one minute spent waiting for a shop to open (default 0: you
+   * would rather leave later). Waiting always counts in the real duration.
+   */
+  waitCostPerMinute?: number;
   /** Number of best tours to return. */
   k: number;
+  /**
+   * What makes two tours different:
+   * - "shopSet" (default): a different set of shops; only the best itinerary
+   *   of each set is kept, so the top-k shows genuinely different plans;
+   * - "itinerary": any different sequence of legs.
+   */
+  distinct?: "shopSet" | "itinerary";
   /** Safety valve against pathological inputs. */
   maxExpandedLabels?: number;
 }
@@ -59,13 +71,18 @@ export interface Leg {
   dwellMinutes: number;
   /** Time at which we leave `to` (after parking, waiting and shopping). */
   readyAt: number;
-  /** Generalized cost of this leg, including parking, waiting and dwell. */
+  /** Score of this leg, including parking, dwell and weighted waiting. */
   cost: number;
   /** Brand satisfied at `to`, if any. */
   visitedBrand?: number;
 }
 
 export interface Tour {
+  /**
+   * Ranking score: travel weighted by the mode coefficients, plus parking,
+   * shopping time and (optionally) weighted waiting. Used for sorting only,
+   * never shown as a time.
+   */
   cost: number;
   /** Real elapsed minutes from departure to return home. */
   durationMinutes: number;

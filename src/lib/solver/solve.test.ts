@@ -41,8 +41,12 @@ describe("solve", () => {
     expect(tours[0]!.cost).toBeCloseTo(56);
     expect(tours[0]!.durationMinutes).toBe(65);
     expect(tours[0]!.travelMinutesByMode).toEqual({ walk: 45, transit: 0, drive: 0 });
-    // Only 4 distinct tours exist (one shop per brand, no detours on foot).
-    expect(tours.map((t) => t.cost)).toEqual([56, 60, 64, 68].map((c) => expect.closeTo(c)));
+    // Two shop sets ({A1,B1}, {A2,B1}): only the best order of each is kept.
+    expect(tours.map((t) => t.cost)).toEqual([56, 64].map((c) => expect.closeTo(c)));
+
+    // Itinerary mode lists both orders of each set (no detours on foot).
+    const all = expectOk(solve({ ...input, distinct: "itinerary" }));
+    expect(all.map((t) => t.cost)).toEqual([56, 60, 64, 68].map((c) => expect.closeTo(c)));
   });
 
   it("drives a simple loop and does not pay parking at home", () => {
@@ -92,9 +96,13 @@ describe("solve", () => {
     // 40 driving * 1.2 + 7 walking * 0.8 + 29 transit + 3 visits * 10, free parking.
     expect(tours[0]!.cost).toBeCloseTo(48 + 5.6 + 29 + 30);
     expect(tours[0]!.travelMinutesByMode).toEqual({ walk: 7, transit: 29, drive: 40 });
-    expect(tours).toHaveLength(5);
-    for (let i = 1; i < tours.length; i++) {
-      expect(tours[i]!.cost).toBeGreaterThanOrEqual(tours[i - 1]!.cost);
+    // A single shop set exists; itinerary mode ranks the variants.
+    expect(tours).toHaveLength(1);
+    const variants = expectOk(solve({ ...input, distinct: "itinerary" }));
+    expect(variants).toHaveLength(5);
+    expect(variants[0]).toEqual(tours[0]);
+    for (let i = 1; i < variants.length; i++) {
+      expect(variants[i]!.cost).toBeGreaterThanOrEqual(variants[i - 1]!.cost);
     }
   });
 
@@ -124,7 +132,7 @@ describe("solve", () => {
     expect(route(input, tours[0]!.legs)).toEqual(["H>B:walk", "B>A:walk", "A>H:walk"]);
   });
 
-  it("waits for opening and charges the wait as unweighted time", () => {
+  it("waits for opening: real time always, score only if asked", () => {
     const nodes = [home, shop("A", 0, { openIntervals: [[30, 600]] })];
     const input = makeInput(nodes, ["A"], { walk: table({ "H-A": 10 }, null) });
 
@@ -132,8 +140,11 @@ describe("solve", () => {
 
     expect(best!.waitMinutes).toBe(20);
     expect(best!.legs[0]!.readyAt).toBe(40);
-    expect(best!.cost).toBeCloseTo(20 * 0.8 + 20 + 10);
     expect(best!.durationMinutes).toBe(50);
+    expect(best!.cost).toBeCloseTo(20 * 0.8 + 10);
+
+    const [charged] = expectOk(solve({ ...input, waitCostPerMinute: 1 }));
+    expect(charged!.cost).toBeCloseTo(20 * 0.8 + 20 + 10);
   });
 
   it("reports brands without any candidate", () => {

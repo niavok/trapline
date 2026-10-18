@@ -92,7 +92,7 @@ export function applyMove(
       waitMinutes,
       dwellMinutes,
       readyAt,
-      cost: travelCost + parkingMinutes + waitMinutes + dwellMinutes,
+      cost: travelCost + parkingMinutes + waitMinutes * (input.waitCostPerMinute ?? 0) + dwellMinutes,
       visitedBrand,
     },
   };

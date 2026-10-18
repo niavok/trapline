@@ -1,85 +1,85 @@
 # Architecture
 
 Personal multimodal shopping-tour optimizer (Next.js App Router on Vercel).
+Goal: decide *roughly* where to go (which mall / district, which modes), not a
+minute-accurate schedule. A solve may take up to ~1 minute.
+
+## Score vs time
+
+- **Score** (`Tour.cost`) ranks tours: travel x mode coefficient + parking +
+  shopping time (+ waiting x `waitCostPerMinute`, default 0). It expresses
+  preferences ("15 more minutes are worth avoiding the car") and is **never
+  displayed as a time**.
+- **Real time** (`durationMinutes`, per-mode minutes, return time) is what the
+  UI shows, so preferences are not counted twice.
 
 ## Limits that shape the design (checked October 2026)
 
 | Constraint | Value | Consequence |
 | --- | --- | --- |
-| `computeRouteMatrix` elements per request | 625 in general, **100 for TRANSIT** and for `TRAFFIC_AWARE_OPTIMAL` | Tiles of 25x25 (walk, drive `TRAFFIC_AWARE`) and 10x10 (transit) |
-| `computeRouteMatrix` throughput | **3,000 elements / minute** per project | A full 3-mode matrix for ~40 nodes (~4-5k elements) needs a throttled queue over ~2 min, not `Promise.all` |
-| Waypoints given as address / placeId | 50 per request | Always send lat/lng |
-| Matrix billing | Per element. Essentials ~5 USD / 1000 (10k free / month), Pro ~10 USD / 1000 (5k free / month; traffic-aware routing is Pro) | Pruning pairs matters more than anything else |
-| Places Text Search with opening hours | Enterprise SKU, ~35 USD / 1000 requests, 1k free / month | One request per brand, negligible |
-| Vercel function duration (Fluid compute) | 300 s default/max on Hobby, up to 800 s on Pro | A solve call fits, but the matrix pass must stream progress |
+| `computeRouteMatrix` per request | 625 elements, **100 for TRANSIT** / `TRAFFIC_AWARE_OPTIMAL` | Only matters for bulk calibration |
+| `computeRouteMatrix` throughput | 3,000 elements / minute | Irrelevant once measurements are lazy |
+| Google billing | per element, Essentials ~5 USD / 1000 (10k free / month), Pro ~10 USD / 1000 (5k free) | Measure few legs, cache them |
+| Google caching terms | coordinates: 30 days max; Routes durations unclear | Cache TTL 30 days |
+| PRIM (IDFM) journey planner | free, 20k req/day and 10 req/s for older tokens (check yours) | Transit measurements from IDFM, not Google |
+| Vercel functions | 300 s (Hobby) / 800 s (Pro) with Fluid compute; bundle 250 MB | Offline road graph can ship in the bundle |
 
-## Main design decisions
+## Pipeline
 
-1. **The solver is pure** (`src/lib/solver`): node list + one raw-time matrix per
-   mode + opening intervals (minutes since departure) in, ranked tours out. No
-   I/O, no dates, no Google types.
-2. **Exact k-best search.** Label-setting A\* on the state
-   `(position, car position, visited brands)`; each label also carries the
-   clock time. Waiting before opening is allowed and costs 1 per minute, which
-   gives a clean dominance rule: A beats B at the same state if
-   `A.time <= B.time` and `A.cost + (B.time - A.time) <= B.cost`. A label is
-   dropped once *k* settled labels dominate it, so the top-k stays exact even
-   with opening hours (verified against a brute-force enumerator on 300 random
-   instances).
-3. **Move pruning (part of the model).** Walk/transit legs only go to a shop of
-   a brand not done yet or back to the car; drive legs can go anywhere (any
-   reachable node is a parking spot). Walk/transit legs strictly dominated by
-   the other mode (slower *and* costlier) are skipped.
-4. **Lower bound.** Each remaining brand costs at least its dwell plus the
-   cheapest leg into one of its shops; one more leg into home is needed if we
-   or the car are away. Consistent, so A\* stays exact. This cut a
-   6 brands x 8 candidates case from ~20 s to < 1 s (top-1) / ~4 s (top-10).
-5. **Two-pass timing.** Matrices (pass 1) feed the solver with k = 10; the
-   refinement pass calls `computeRoutes` on the transit legs of those tours,
-   re-prices walking parts at the walk coefficient, and replays each itinerary
-   with `simulateItinerary` (which re-checks opening hours with the new times)
-   before re-ranking and keeping 5.
+1. **Candidates**: Places Text Search per brand (Ile-de-France bounding box,
+   opening hours), K nearest to home, user unticks some.
+2. **Estimates (free)** for every pair:
+   - walk: crow-fly x 1.3 / 4.8 km/h, used as final value (no cap: the walk
+     coefficient decides);
+   - drive: offline road graph from OpenStreetMap, speeds per road class
+     calibrated on a few dozen Google measurements (*next step*); crow-fly
+     model meanwhile;
+   - transit: crow-fly model, superseded by cached zone-to-zone values.
+3. **Lazy measurement** (`planning/lazySolve.ts`): solve on estimates, measure
+   the unknown transit / drive legs of the best 2k tours (PRIM / Google), solve
+   again, until the top-k only uses measured legs. Exact when estimates never
+   exceed the real time (and waiting is free in the score); with calibrated
+   estimates it measures ~5-10 % of the pairs in < 10 rounds.
+4. **Zone cache** (`geo/zones.ts`, `planning/cachedSource.ts`): ~400 m grid
+   cells; key = mode + time slot (weekday peak / off-peak, Saturday, Sunday) +
+   origin cell + destination cell. Shared across requests (Upstash Redis in
+   production; serverless memory does not survive), TTL 30 days. Legs inside a
+   single cell are not shared.
+
+## Solver (`src/lib/solver`, pure)
+
+- Label-setting A\* on `(position, car position, visited brands)`; labels carry
+  clock time for opening hours. Waiting before opening is allowed.
+- Dominance at a state: `A.time <= B.time` and
+  `A.g + c x max(0, min(B.time, W) - A.time) <= B.g`, with `c` the waiting cost
+  and `W` the latest opening time among shops still to visit.
+- **Top-k distinct by shop set** (default): only the best itinerary of each set
+  of shops is kept ("Velizy by car" vs "Les Halles by RER" rather than 5 orders
+  of the same visit). `distinct: "itinerary"` keeps every itinerary.
+- Move pruning: walk / transit legs go to a brand not done yet or back to the
+  car; drive legs go anywhere (any node is a place to park). Walk / transit
+  legs slower *and* costlier than the other mode are skipped.
+- Consistent lower bound: per remaining brand, dwell + cheapest leg into one of
+  its shops; one more leg into home when we or the car are away.
+- Verified against a brute-force enumerator (300 random instances x both
+  distinctness modes, with mutation checks).
 
 ## File layout
 
 ```
-src/
-  lib/
-    solver/            # pure, fully unit-tested
-      types.ts         # SolverInput, Tour, Leg...
-      rules.ts         # opening hours, parking penalty, single-leg application
-      solve.ts         # k-best A* search
-      simulate.ts      # replay a fixed itinerary (refinement pass)
-      summary.ts, heap.ts
-    google/            # (next step) thin, typed REST clients
-      places.ts        # Text Search (IDF bounding box, field mask)
-      routeMatrix.ts   # tiling, throttling (elements/min), no-route handling
-      routes.ts        # computeRoutes for transit legs (step breakdown)
-    planning/          # (next step) glue between APIs and solver
-      nodes.ts         # brands + candidates + parkings -> SolverNode[]
-      openingHours.ts  # Places periods (Europe/Paris) -> minutes since departure
-      elements.ts      # billed-element estimate shown before running
-      refine.ts        # pass 2
-    cache/
-      types.ts         # MatrixCache interface (get/set many)
-      memory.ts        # in-memory LRU; Upstash Redis adapter later
-    maps/links.ts      # https://www.google.com/maps/dir/?api=1&...&travelmode=
-    auth/session.ts    # signed cookie (HMAC of APP_PASSWORD)
-    rateLimit.ts
-  middleware.ts        # redirects to /login without a valid session
-  app/
-    page.tsx           # form, candidate checklist, estimate, results
-    login/page.tsx
-    api/login/route.ts
-    api/candidates/route.ts   # Places search -> candidates to review
-    api/solve/route.ts        # matrices + solve + refine (streams progress)
-  components/          # TourForm, CandidateList, TourList, TourMap (Leaflet, ssr: false)
+src/lib/
+  solver/      types, rules, solve (A*), simulate (replay an itinerary), tests
+  geo/         geo (haversine), crowFly (estimate models), zones (cells, slots, keys)
+  cache/       TravelTimeCache interface, in-memory implementation
+  planning/    lazySolve (measurement loop), cachedSource (zone cache + fetcher)
+  (next)       roads/ (OSM graph build script + runtime Dijkstra),
+               google/ (places, routes), prim/ (transit), auth, rateLimit
+src/app/       (next) form, candidates, results, map, /api/candidates, /api/solve
 ```
 
-## Open points / known approximations
+## Known approximations
 
-- Matrices are computed for one departure time slot; real legs depart later.
-  The refinement pass uses each leg's actual departure time for transit.
-- Pass 1 assumes walk/transit matrices are roughly metric (no detour through a
-  node where nothing happens can be shorter).
-- Malls close too: a car parked at a shop has no closing-time check.
+- Estimates are calibrated, not strict lower bounds: a leg much slower than its
+  estimate is always measured, a leg much faster may hide a better tour.
+- Transit time depends on the slot, not on the exact minute.
+- The closing time of a mall where the car is parked is not checked.
